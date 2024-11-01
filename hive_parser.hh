@@ -89,13 +89,13 @@ public:
 	{
 	}
 
-	[[nodiscard]] std::vector<std::string> subkeys_list() const
+	[[nodiscard]] std::vector<std::string_view> subkeys_list() const
 	{
 		const auto item = reinterpret_cast<offsets_t*>(this->main_root + key_block->subkeys);
 		if (item->block_type[1] != 'f' && item->block_type[1] != 'h')
 			return {};
 
-		std::vector<std::string> out;
+		std::vector<std::string_view> out;
 		for (auto i = 0; i < key_block->subkey_count; i++)
 		{
 			const auto subkey = reinterpret_cast<key_block_t*>((&item->first)[i * 2] + this->main_root);
@@ -108,12 +108,12 @@ public:
 		return out;
 	}
 
-	[[nodiscard]] std::vector<std::string> keys_list() const
+	[[nodiscard]] std::vector<std::string_view> keys_list() const
 	{
 		if (!key_block->value_count)
 			return {};
 
-		std::vector<std::string> out;
+		std::vector<std::string_view> out;
 		for (auto i = 0; i < key_block->value_count; i++)
 		{
 			const auto value = reinterpret_cast<value_block_t*>(reinterpret_cast<int*>(key_block->offsets + this->
@@ -128,50 +128,44 @@ public:
 	}
 
 	template <class T>
-	std::optional<T> get_key_value(const std::string& name)
+	std::optional<T> get_key_value(const std::string_view& name)
 	{
 		for (auto i = 0; i < key_block->value_count; i++)
 		{
 			const auto value = reinterpret_cast<value_block_t*>(reinterpret_cast<int*>(key_block->offsets + this->
 				main_root + 4)[i] + this->main_root);
-			if (!value || std::string(value->name, value->name_len) != name)
+			if (!value || std::string_view(value->name, value->name_len) != name)
 				continue;
 
 			auto data = reinterpret_cast<char*>(this->main_root + value->offset + 4);
 			if (value->size & 1 << 31)
 				data = reinterpret_cast<char*>(&value->offset);
 
-			if constexpr (std::is_same_v<T, std::string>)
+			if constexpr (std::is_same_v<T, std::string_view>)
 			{
 				if (value->value_type != REG_SZ && value->value_type != REG_EXPAND_SZ)
 					return std::nullopt;
 
-				std::string text;
-				for (auto j = 0; j < (value->size & 0xffff); j++)
-				{
-					text.append(&data[j]);
-				}
-
-				return text;
+				return std::string_view(data, value->size & 0xffff);
 			}
-			else if constexpr (std::is_same_v<T, std::vector<std::string>>)
+			else if constexpr (std::is_same_v<T, std::vector<std::string_view>>)
 			{
 				if (value->value_type != REG_MULTI_SZ)
 					return std::nullopt;
 
-				std::string text;
-				std::vector<std::string> out;
+				std::string_view text;
+				std::vector<std::string_view> out;
 				for (auto j = 0; j < (value->size & 0xffff); j++)
 				{
 					if (data[j] == '\0' && data[j + 1] == '\0' && data[j + 2] == '\0')
 					{
 						if (!text.empty())
 							out.emplace_back(text);
-						text.clear();
+						text = {};
 					}
 					else
 					{
-						text += data[j];
+						text = std::string_view(data + j - text.size(), text.size() + 1);
 					}
 				}
 
@@ -184,17 +178,12 @@ public:
 
 				return *reinterpret_cast<T*>(data);
 			}
-			else if constexpr (std::is_same_v<T, std::vector<uint8_t>>)
+			else if constexpr (std::is_same_v<T, std::basic_string_view<uint8_t>>)
 			{
 				if (value->value_type != REG_BINARY)
 					return std::nullopt;
 
-				std::vector<uint8_t> out;
-				out.reserve(value->size & 0xffff);
-				for (auto j = 0; j < (value->size & 0xffff); j++)
-					out.emplace_back(data[j]);
-
-				return out;
+				return {data, value->size & 0xffff};
 			}
 		}
 
@@ -247,7 +236,7 @@ class hive_parser
 					                         hive_key_t{subkey, main_root}, std::vector<hive_subpaths_t>{}
 				                         });
 
-			const auto extract_main_key = [ ](const std::string& str) -> std::string
+			const auto extract_main_key = [ ](const std::string_view str) -> std::string_view
 			{
 				const size_t slash_pos = str.find('/');
 				if (slash_pos == std::string::npos)
@@ -259,14 +248,25 @@ class hive_parser
 			if (subkey->subkey_count > 0)
 			{
 				reclusive_search(subkey, full_path, true);
-				subkey_cache.at(extract_main_key(full_path)).subpaths.emplace_back(hive_subpaths_t{
+				const auto entry = subkey_cache.find(extract_main_key(full_path));
+				if (entry == subkey_cache.end())
+				{
+					throw std::out_of_range("Invalid key");
+				}
+
+				entry->second.subpaths.emplace_back(hive_subpaths_t{
 					full_path, hive_key_t{subkey, main_root}
 				});
 			}
 			else
 			{
-				subkey_cache.at(extract_main_key(full_path)).subpaths.emplace_back(
-					full_path, hive_key_t{subkey, main_root});
+				const auto entry = subkey_cache.find(extract_main_key(full_path));
+				if (entry == subkey_cache.end())
+				{
+					throw std::out_of_range("Invalid key");
+				}
+
+				entry->second.subpaths.emplace_back(full_path, hive_key_t{subkey, main_root});
 			}
 		}
 	}
