@@ -4,6 +4,8 @@
 #include <fstream>
 #include <vector>
 #include <optional>
+#include <filesystem>
+#include <string_view>
 #include <unordered_map>
 
 struct offsets_t
@@ -44,6 +46,34 @@ struct value_block_t
 	short dummy;
 	char name[255];
 };
+
+namespace detail
+{
+	std::vector<char> read_file(const std::filesystem::path& file_path)
+	{
+		std::ifstream file(file_path, std::ios::binary);
+		if (!file.is_open())
+		{
+			return {};
+		}
+
+		return {std::istreambuf_iterator(file), std::istreambuf_iterator<char>()};
+	}
+
+	struct string_hash
+	{
+		using is_transparent = void;
+
+		size_t operator()(const std::string_view str) const
+		{
+			constexpr std::hash<std::string_view> hasher{};
+			return hasher(str);
+		}
+	};
+
+	template <typename T>
+	using unordered_string_map = std::unordered_map<std::string, T, string_hash, std::equal_to<>>;
+}
 
 class hive_key_t
 {
@@ -189,7 +219,7 @@ class hive_parser
 	key_block_t* main_key_block_data;
 	uintptr_t main_root;
 	std::vector<char> file_data;
-	std::unordered_map<std::string, hive_cache_t> subkey_cache;
+	detail::unordered_string_map<hive_cache_t> subkey_cache;
 
 	void reclusive_search(const key_block_t* key_block_data, const std::string& current_path,
 	                      const bool is_reclusive = false)
@@ -207,9 +237,9 @@ class hive_parser
 			if (!subkey)
 				continue;
 
-			std::string subkey_name(subkey->name, subkey->len);
+			std::string_view subkey_name(subkey->name, subkey->len);
 			std::string full_path = current_path.empty()
-				                        ? subkey_name
+				                        ? std::string(subkey_name)
 				                        : std::string(current_path).append("/").append(subkey_name);
 
 			if (!is_reclusive)
@@ -242,41 +272,19 @@ class hive_parser
 	}
 
 public:
-	explicit hive_parser(const std::string& file_directory)
+	explicit hive_parser(const std::filesystem::path& file_path)
+		: hive_parser(detail::read_file(file_path))
 	{
-		std::ifstream file(file_directory, std::ios::binary);
-		if (!file.is_open())
+	}
+
+	explicit hive_parser(std::vector<char> input_data)
+		: file_data(std::move(input_data))
+	{
+		if (file_data.size() < 0x1020)
 			return;
-
-		file.seekg(0, std::ios::end);
-		const std::streampos size = file.tellg();
-		if (size < 0x1020)
-			return;
-
-		file.seekg(0, std::ios::beg);
-
-		file_data.resize(size);
-		file.read(file_data.data(), size);
-		file.close();
 
 		if (file_data.at(0) != 'r' && file_data.at(1) != 'e' && file_data.at(2) != 'g' && file_data.at(3) != 'f')
 			return;
-
-		main_key_block_data = reinterpret_cast<key_block_t*>(reinterpret_cast<uintptr_t>(file_data.data() + 0x1020));
-		main_root = reinterpret_cast<uintptr_t>(main_key_block_data) - 0x20;
-
-		reclusive_search(main_key_block_data, "");
-	}
-
-	explicit hive_parser(const std::vector<char>& input_data)
-	{
-		if (input_data.size() < 0x1020)
-			return;
-
-		if (input_data.at(0) != 'r' && input_data.at(1) != 'e' && input_data.at(2) != 'g' && input_data.at(3) != 'f')
-			return;
-
-		file_data = input_data;
 
 		main_key_block_data = reinterpret_cast<key_block_t*>(reinterpret_cast<uintptr_t>(file_data.data() + 0x1020));
 		main_root = reinterpret_cast<uintptr_t>(main_key_block_data) - 0x20;
@@ -289,13 +297,19 @@ public:
 		return !subkey_cache.empty();
 	}
 
-	[[nodiscard]] std::optional<hive_key_t> get_subkey(const std::string& key_name, const std::string& path) const
+	[[nodiscard]] std::optional<hive_key_t> get_subkey(const std::string_view key_name,
+	                                                   const std::string_view path) const
 	{
 		if (!subkey_cache.contains(key_name))
 			return std::nullopt;
 
-		const auto hive_block = subkey_cache.at(key_name);
-		for (const auto& hive : hive_block.subpaths)
+		const auto hive_block = subkey_cache.find(key_name);
+		if (hive_block == subkey_cache.end())
+		{
+			throw std::out_of_range("Invalid key");
+		}
+
+		for (const auto& hive : hive_block->second.subpaths)
 		{
 			if (hive.path == path)
 				return hive.data;
